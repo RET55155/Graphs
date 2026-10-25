@@ -1,0 +1,187 @@
+[
+ {
+  "name": "ping",
+  "why": "protocol",
+  "input": {
+   "task": "ping"
+  },
+  "output": {
+   "status": "ready"
+  }
+ },
+ {
+  "name": "dag cycle unreachable from source",
+  "why": "cycle 2<->3 is not reachable from source 0, but the WHOLE graph must be checked",
+  "input": {
+   "task": "dag",
+   "n": 4,
+   "source": 0,
+   "edges": [
+    [
+     0,
+     1,
+     5
+    ],
+    [
+     2,
+     3,
+     1
+    ],
+    [
+     3,
+     2,
+     1
+    ]
+   ]
+  },
+  "output": {
+   "acyclic": false,
+   "distance": [],
+   "parent_edge": []
+  }
+ },
+ {
+  "name": "dag tie + parallel + unreachable",
+  "why": "dist[3] = -1 via 1 or via 2 (tie); edges 0 and 1 are parallel; vertex 4 unreachable",
+  "input": {
+   "task": "dag",
+   "n": 5,
+   "source": 0,
+   "edges": [
+    [
+     0,
+     1,
+     2
+    ],
+    [
+     0,
+     1,
+     2
+    ],
+    [
+     0,
+     2,
+     1
+    ],
+    [
+     1,
+     3,
+     -3
+    ],
+    [
+     2,
+     3,
+     -2
+    ]
+   ]
+  },
+  "output": {
+   "acyclic": true,
+   "distance": [
+    0,
+    2,
+    1,
+    -1,
+    null
+   ],
+   "parent_edge": [
+    -1,
+    0,
+    2,
+    3,
+    -1
+   ]
+  }
+ },
+ {
+  "name": "kruskal negative loop/parallel/isolate",
+  "why": "loop -99 ignored, one of the two -2 edges, one 3-edge, vertex 3 isolated: cost 1, 2 components",
+  "input": {
+   "task": "kruskal",
+   "n": 4,
+   "edges": [
+    [
+     0,
+     1,
+     -2
+    ],
+    [
+     0,
+     1,
+     -2
+    ],
+    [
+     1,
+     2,
+     3
+    ],
+    [
+     0,
+     2,
+     3
+    ],
+    [
+     3,
+     3,
+     -99
+    ]
+   ]
+  },
+  "output": {
+   "cost": 1,
+   "components": 2,
+   "edge_ids": [
+    0,
+    2
+   ]
+  }
+ },
+ {
+  "name": "scc two cycles + bridge",
+  "why": "{0,1} and {2,3} are cycles, one bridge 1->2 (duplicate counted once)",
+  "input": {
+   "task": "scc",
+   "n": 4,
+   "edges": [
+    [
+     0,
+     1
+    ],
+    [
+     1,
+     0
+    ],
+    [
+     2,
+     3
+    ],
+    [
+     3,
+     2
+    ],
+    [
+     1,
+     2
+    ],
+    [
+     1,
+     2
+    ]
+   ]
+  },
+  "output": {
+   "component": [
+    0,
+    0,
+    1,
+    1
+   ],
+   "condensation": [
+    [
+     0,
+     1
+    ]
+   ]
+  }
+ }
+]

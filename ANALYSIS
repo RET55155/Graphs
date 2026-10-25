@@ -1,0 +1,154 @@
+# Assignment 3 — Analysis (Java 17)
+
+Language: Java (`submission.json` → `"language": "Java"`). Implementation: `src/Java/Algorithms.java`.
+
+## Build / run / test commands (repository root)
+
+```sh
+python tools/run.py --setup                 # transport check (ping)
+python tools/run.py --check                 # 36 public cases + state reset (two batches in one process)
+python tools/run.py --input tests/my_cases.jsonl      # own JSON Lines cases (prints actual answers)
+python tests/make_cases.py                  # (re)generate tests/my_cases.jsonl and tests/limit_cases.jsonl
+python tools/run.py --input tests/limit_cases.jsonl   # full limits n=100000, m=250000
+javac --release 17 -encoding UTF-8 -d .build/tests src/Java/*.java tests/*.java
+java -cp .build/tests AlgorithmsTests       # own unit tests (incl. route helper, witness checks)
+java -Xmx384m -cp .build/tests Benchmark    # Kruskal vs Prim benchmark
+```
+
+## Cross-cutting design
+
+**State reset.** Every method keeps all state (parent/size arrays, visited/state arrays, heaps, adjacency)
+in local variables created per request. There are no static fields, so one request cannot influence the next.
+Checked by `python tools/run.py --check` ("state reset" case) and by `stateResetTest` in `AlgorithmsTests`.
+
+**Deep DFS.** Recursion would overflow the JVM stack on a chain of 100 000 vertices. All DFS passes
+(SCC pass 1 and 2, topo, DAG cycle check) use an explicit `int[] stack` plus a per-vertex edge pointer `pos[v]`,
+which reproduces the "enter / next neighbour / finish" behaviour of recursive DFS. Each vertex is pushed at most
+once, so the stack array of size `n` is enough. `find` in DSU is also iterative (two loops: find root, compress).
+Checked by deep-chain tests (n = 100 000) for dsu, scc, topo and dag.
+
+**Graph storage.** Compressed adjacency lists (`start[]`, `target[]`, `edgeId[]`) built with counting: O(n + m) time
+and memory, no per-edge objects. `edgeId` keeps the *original* position in `edges`, which the output requires.
+
+**Integers.** Totals and distances are `long` (up to 250 000 · 10⁹ ≈ 2.5·10¹⁴ > 2³¹). Weights are read as `int`.
+
+## DSU (`dsu`)
+
+*Steps.* parent[i]=i, size[i]=1; for each `[u,v]`: find both roots (path compression), if different attach the
+smaller tree under the larger, update `components--` and `largest = max(largest, size[root])`; append `[components, largest]`
+(also for self-unions and repeats, where nothing changes).
+*Invariants.* parent[] is a forest; size[root] = number of vertices in its tree; `components` = number of roots;
+`largest` = max size over all roots (sizes only grow, so a running max is exact).
+*Correctness.* A union changes only the two merged sets; the answer after each operation is computed from exactly these invariants.
+*Boundaries.* n = 0 and no operations → empty `states`; u == v; repeated pairs; n = 1 → largest = 1.
+*Complexity.* O((n + q) · α(n)) time, O(n + q) memory (the q output states).
+
+## Kruskal (`kruskal`)
+
+*Steps.* Pack every edge into one `long` key `(w + 10⁹) << 20 | id`, sort the primitive array (weight, then id),
+scan it with DSU, take an edge if its endpoints are in different sets; `components = n − taken`.
+*Invariants.* The taken edges form a forest; every skipped edge connects two vertices already connected by cheaper-or-equal taken edges.
+*Correctness.* Cut/cycle property: the cheapest edge crossing any cut separating two components is safe, so greedy order is optimal;
+loops are skipped automatically (same root); parallel edges — the later one is skipped. Negative weights are fine because only the order matters.
+*Boundaries.* Loops, parallel edges, negative weights, isolates (counted in `components`), m = 0, n = 0. `id < 2²⁰` because m ≤ 250 000.
+*Complexity.* O(m log m + m·α(n)) time, O(n + m) memory.
+
+## Prim (`prim`)
+
+*Steps.* Build undirected adjacency (loops dropped). For each unvisited vertex `s` start a new component: mark `s`, push its
+edges into a min-heap (packed weight/id), pop the cheapest edge; if both endpoints are visited it is stale, otherwise
+the unvisited endpoint joins the tree, its cost and id are recorded and its edges are pushed. The component ends when the heap is empty;
+the outer loop restarts at the next unvisited vertex (**restart per component** → minimum spanning *forest*).
+*Invariants.* The visited set of the current component is a tree; the heap contains every edge leaving the visited set (plus stale ones).
+*Correctness.* The popped non-stale edge is the cheapest edge crossing the cut (visited, unvisited) → safe edge (cut property).
+*Boundaries.* Disconnected graphs (restart), isolates (a component with no edges), loops, parallel edges, negative weights, m = 0.
+*Complexity.* O(m log m) time (heap holds ≤ 2m entries, log 2m = O(log m)), O(n + m) memory.
+
+## SCC (`scc`, Kosaraju)
+
+*Steps.* (1) Iterative DFS on the original graph, record vertices in finish order. (2) Build the transpose; process vertices in
+decreasing finish time, each unlabelled vertex starts a DFS on the transpose and everything it reaches gets the new label.
+(3) For every edge `(u,v)` with `comp[u] != comp[v]` add `(comp[u], comp[v])` once (a `HashSet<Long>` of `a·k + b` removes duplicates).
+*Invariants.* After pass 1, the vertex with the largest finish time lies in a source component of the condensation;
+in pass 2 the transpose DFS cannot leave its component, because edges to other components point the "wrong way" in the transpose.
+*Correctness.* Standard Kosaraju argument: for components C→C′, max finish(C) > max finish(C′).
+*Boundaries.* Self-loops (same component, no pair), duplicate cross edges (one pair), isolates (singleton components), n = 0, deep chain, one giant cycle.
+*Complexity.* O(n + m) time and memory.
+
+## Topological order (`topo`)
+
+*Steps.* Three states: white (0), gray (1, on the DFS stack), black (2, finished). An edge to a gray vertex is a back edge = directed cycle
+(a self-loop is the shortest case) → return `acyclic=false, order=[]`. Otherwise vertices are written into the result array from the back in
+finish order, i.e. the result is the reverse finish order.
+*Invariants.* Gray vertices form a path from the DFS root; a vertex becomes black only after all its successors are black.
+*Correctness.* No cycle ⇒ every edge `u→v` is explored when v is black or white, so v finishes before u ⇒ u precedes v in the reverse order.
+A cycle always contains a back edge, so it is detected wherever it is in the graph (all vertices are used as roots).
+*Boundaries.* n = 0, isolates, parallel edges, self-loop, cycle in a part that is not reachable from vertex 0, deep chain.
+*Complexity.* O(n + m) time and memory.
+
+## DAG shortest paths (`dag`)
+
+*Steps.* (1) Run the same three-state DFS on the **whole** graph; a cycle anywhere (even unreachable from `source`) → `false`, two empty arrays.
+(2) Otherwise, in topological order relax the outgoing edges of every *reached* vertex: `dist[v] + w < dist[to]` (strict) updates `dist` and `parent_edge[to] = original edge id`.
+Unreached vertices keep `null` / `-1`; the source has `0` / `-1`.
+*Invariants.* When v is processed, all its predecessors were processed before (topological order), so `dist[v]` is final.
+*Correctness.* Induction along the topological order; negative weights are fine because each edge is relaxed exactly once from a final distance.
+`parent_edge[v]` always enters v and satisfies `dist[parent] + w = dist[v]`, so following it gives a shortest route that ends at the source.
+Strict `<` means the first best edge wins ties, parallel edges are handled by their ids.
+*Boundaries.* n = 1, source with no edges, unreachable vertices, unreachable cycle, self-loop, 64-bit distances, deep chain.
+*Complexity.* O(n + m) time and memory.
+
+### Route-reconstruction helper
+
+`Algorithms.route(parentEdge, edges, source, target)` returns the vertex route (follow `parent_edge`, read `edges[id][0]`, reverse);
+`Algorithms.routeEdges(...)` returns the same route as original edge ids. Target == source → `[source]` (no edges); unreachable → empty list.
+A guard of n steps protects against corrupt parent arrays. Time/memory O(route length).
+
+Example graph (`tests/AlgorithmsTests.java`): n = 5, source 0, edges
+`0:[0,1,2] 1:[0,1,2] 2:[0,2,1] 3:[1,3,-3] 4:[2,3,-2]`; result `distance=[0,2,1,-1,null]`, `parent_edge=[-1,0,2,4,-1]`.
+
+| Call | Result | Why |
+|---|---|---|
+| `route(parent, edges, 0, 3)` (reachable) | `[0, 2, 3]` | 0→2 (1) and 2→3 (−2) = −1 = distance[3] |
+| `route(parent, edges, 0, 0)` (source) | `[0]` | no edges needed |
+| `route(parent, edges, 0, 4)` (unreachable) | `[]` | `parent_edge[4] = -1`, vertex 4 ≠ source |
+| `routeEdges(parent, edges, 0, 1)` (parallel edges 0 and 1, both cost 2) | `[0]` | either id is valid; the first one wins because of strict `<`; the test accepts both |
+| `route(parent, edges, 0, 3)` with the tie (via 1 or via 2, both −1) | `[0, 2, 3]` or `[0, 1, 3]` | both are shortest; the test only checks validity |
+
+## Tests (`tests/`)
+
+| File | Content |
+|---|---|
+| `AlgorithmsTests.java` | 34 checks: hand-computed expected values (reasoning in comments), alternative valid answers, **invalid** witnesses must be rejected, route helper (4 required situations), deep chains (n = 100 000), 64-bit sums, cycle unreachable from source, repeated mixed requests, Kruskal == Prim on 200 random graphs |
+| `my_cases.jsonl` + `my_cases.expected.json` | JSON Lines inputs with expected answers and the reason for each case; run with `tools/run.py --input` |
+| `limit_cases.jsonl` (generated by `make_cases.py`, not committed, about 28 MB) | all six tasks at full limits (n = 100 000, m = 250 000, weights ±10⁹); Kruskal and Prim must report the same cost |
+| `make_cases.py` | generator (fixed seed 12345) |
+
+Results of my last run: `AlgorithmsTests` — ALL TESTS PASSED; `tools/run.py --check` — all 36 public cases + state reset PASS; the full-limit batch finishes in about 5 s including JVM start.
+
+## Benchmark: Kruskal vs Prim
+
+*Inputs.* `Benchmark.java`, seed `20260 + n`; random connected graph (random spanning tree + random extra edges), weights in [−10⁶, 10⁶];
+the same edge list is given to both methods. Sizes: (n, m) = (1 000, 5 000), (10 000, 50 000), (100 000, 250 000).
+*Timer / boundary.* `System.nanoTime()` around the single call `Algorithms.kruskal(input)` / `Algorithms.prim(input)`;
+the input is built before the timer; JSON parsing, printing and compilation are excluded.
+*Protocol.* 3 untimed warm-up calls, then 5 measured runs per method and size; the median is reported.
+*Command.* `java -Xmx384m -cp .build/tests Benchmark`.
+*Environment.* Intel Xeon @ 2.10 GHz, 1 logical CPU available to the JVM, 4 GB RAM, Linux 6.18, OpenJDK 21.0.12 (compiled with `--release 17`), run with `-Xmx384m`. Timings are in milliseconds; a shared virtual machine was used, so single runs are noisy and the median is the reference value.
+
+| n | m | Method | run 1 | run 2 | run 3 | run 4 | run 5 | median (ms) |
+|---|---|---|---|---|---|---|---|---|
+| 1 000 | 5 000 | Kruskal | 2.00 | 6.81 | 3.75 | 1.26 | 1.20 | 2.00 |
+| 1 000 | 5 000 | Prim | 12.94 | 3.19 | 8.17 | 7.61 | 7.74 | 7.74 |
+| 10 000 | 50 000 | Kruskal | 15.59 | 17.91 | 20.02 | 15.87 | 14.68 | 15.87 |
+| 10 000 | 50 000 | Prim | 53.67 | 36.43 | 30.87 | 32.37 | 42.41 | 36.43 |
+| 100 000 | 250 000 | Kruskal | 43.30 | 91.61 | 38.69 | 71.21 | 39.69 | 43.30 |
+| 100 000 | 250 000 | Prim | 484.38 | 374.47 | 465.45 | 663.52 | 335.20 | 465.45 |
+
+*Discussion.* Both methods are O(m log m) and return the same total cost on every graph (column `cost` of the benchmark output).
+Medians: Kruskal is faster at all sizes, about 3.9 times at n = 1 000, 2.3 times at n = 10 000 and 10.7 times at n = 100 000.
+Kruskal sorts one primitive `long[]` and then performs cheap DSU operations. Prim builds adjacency lists and pushes up to 2m entries
+into a `PriorityQueue<Long>` with boxing, so its constant factor is larger and memory traffic grows faster on the largest graph.
+The ratio at the smallest sizes is influenced by JIT compilation and timer noise, so only the order (Kruskal faster) is reliable there.
+
+
